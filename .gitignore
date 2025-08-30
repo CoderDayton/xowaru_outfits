@@ -1,0 +1,14 @@
+# Project place file
+/xowaru_outfits.rbxlx
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+# Copilot Instructions
+/.github/
+/.kilocode/
+/.roo/
+
+# Local data
+/data/
