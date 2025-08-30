@@ -8,7 +8,7 @@ local RunService = game:GetService("RunService")
 assert(RunService:IsServer(), "Telemetry must be required on the server")
 
 local GameData = require(script.Parent.GameData) -- your base DS wrapper with backoff/budget guard
-local Timer = require(game.ReplicatedStorage.Packages.Timer) -- your interval/delay helper
+local Timer = require(script.Parent.Timer) -- your interval/delay helper
 
 export type TelemetryOptions = {
 	storeName: string?, -- default: "Telemetry"
@@ -161,4 +161,4 @@ function Telemetry.Stop()
 	started = false
 end
 
-return Telemetry :: TelemetryOptions
+return Telemetry
