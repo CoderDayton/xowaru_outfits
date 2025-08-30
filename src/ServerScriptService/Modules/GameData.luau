@@ -3,10 +3,9 @@
 -- Typed, cached DataStore wrapper with backoff/jitter and budget guard
 
 local DataStoreService = game:GetService("DataStoreService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Backoff = require(script.Parent.Backoff)
-local Promise = require(ReplicatedStorage.Utils.Promise)
+local Promise = require(game.ReplicatedStorage.Packages.Promise)
 
 export type CacheEntry = {
 	data: any,
@@ -164,4 +163,4 @@ function GameData:Remove(key: string): any
 	}) -- RemoveAsync has its own throttle/drop codes in 306-class; backoff helps. [1]
 end
 
-return GameData
+return GameData :: GameDataStore

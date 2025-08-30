@@ -8,8 +8,8 @@ local DataStoreService = game:GetService("DataStoreService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 
-local Promise = require(ReplicatedStorage.Utils.Promise)
-local Signal = require(ReplicatedStorage.Utils.Signal)
+local Promise = require(ReplicatedStorage.Packages.Promise)
+local Signal = require(ReplicatedStorage.Packages.Signal)
 local GameData = require(script.Parent.GameData)
 local ProfileMigration = require(script.Parent.ProfileMigration)
 

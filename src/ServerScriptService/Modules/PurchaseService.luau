@@ -6,7 +6,7 @@ local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 
 local GameData = require(script.Parent.GameData)
-local Promise = require(script.Parent.Promise)
+local Promise = require(game.ReplicatedStorage.Packages.Promise)
 
 export type ReceiptInfo = {
 	PlayerId: number,
