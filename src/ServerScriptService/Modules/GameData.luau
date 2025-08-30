@@ -79,7 +79,7 @@ end
 function GameData:Get(key: string, ttl: number?): any
 	local existing = self:GetCached(key)
 	if existing ~= nil then
-		return Promise.Resolve(existing)
+		return Promise.resolve(existing)
 	end
 
 	return Backoff.RetryAsync(function()

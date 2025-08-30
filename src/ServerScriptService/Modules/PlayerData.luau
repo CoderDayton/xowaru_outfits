@@ -23,6 +23,7 @@ local PlayerData = {}
 
 local Profiles = GameData.ForStore("PlayerProfiles")
 local SessionStore: DataStore = DataStoreService:GetDataStore("PlayerSessions")
+local Telemetry = require(script.Parent.Telemetry)
 
 local DEFAULT_PROFILE: Profile = {
 	SchemaVersion = 0,
@@ -57,17 +58,22 @@ function PlayerData.Load(player: Player): any
 
 		-- Load profile (no cache on first read)
 		Profiles:Get(tostring(uid), 0)
-			:AndThen(function(raw: any)
+			:andThen(function(raw: any)
 				local prof: Profile = raw or table.clone(DEFAULT_PROFILE)
 				prof = ProfileMigration.Migrate(prof)
 				prof.JoinCount += 1
+
+				if prof.JoinCount == 1 then
+					Telemetry.Add("NewPlayerJoined")
+				end
+
 				prof.LastSeen = os.time()
-				return Profiles:Set(tostring(uid), prof):AndThen(function()
+				return Profiles:Set(tostring(uid), prof):andThen(function()
 					return prof
 				end)
 			end)
-			:AndThen(resolve)
-			:OnError(function(err)
+			:andThen(resolve)
+			:catch(function(err)
 				pcall(SessionStore.RemoveAsync, SessionStore, skey)
 				reject(err)
 			end)
@@ -92,17 +98,22 @@ end
 function PlayerData.Init()
 	Players.PlayerAdded:Connect(function(player)
 		PlayerData.Load(player)
-			:AndThen(function(profile)
+			:andThen(function(profile)
+				Signal.FireServerLocal("PlayerAdded", player, profile)
 				Signal.FireClient("PlayerAdded", player, profile)
+				Telemetry.Add("ProfileLoaded")
 			end)
-			:OnError(function(err)
+			:catch(function(err)
 				warn("Failed to load profile for player " .. player.UserId .. ": " .. tostring(err))
+                Telemetry.Add("ProfileLoadFailed")
 			end)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
+		Signal.FireServerLocal("PlayerRemoving", player)
 		Signal.FireClient("PlayerRemoving", player)
 		PlayerData.Release(player)
+		Telemetry.Add("PlayerLeft")
 	end)
 end
 

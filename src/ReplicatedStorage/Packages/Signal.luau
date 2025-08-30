@@ -42,6 +42,7 @@ local Maid = require(script.Parent.Maid)
 
 local remotes = {} -- name ➜ RemoteEvent
 local bindables = {} -- name ➜ BindableEvent  (client only)
+local serverBindables = {} -- name ➜ BindableEvent (server only)
 local maids = {} -- name ➜ Maid           (handles cleanup)
 
 --------------------------------------------------------------------
@@ -76,6 +77,17 @@ local function getBindable(name)
 		bindable = Instance.new("BindableEvent")
 		bindable.Name = "BE_" .. name
 		bindables[name] = bindable
+	end
+	return bindable
+end
+
+local function getServerBindable(name)
+	assert(RunService:IsServer(), "Server bindables are server-only")
+	local bindable = serverBindables[name]
+	if not bindable then
+		bindable = Instance.new("BindableEvent")
+		bindable.Name = "BE_" .. name
+		serverBindables[name] = bindable
 	end
 	return bindable
 end
@@ -120,6 +132,16 @@ function RemoteSignal.OnLocal(eventName, fn)
 	return c
 end
 
+-- Server-Server BindableEvent listener (zero-lag internal events)
+function RemoteSignal.OnServerLocal(eventName, fn)
+	assert(RunService:IsServer(), "OnServerLocal only in Script (server)")
+	local b = getServerBindable(eventName)
+	local m = getMaid(eventName .. "_server")
+	local c = b.Event:Connect(fn)
+	m:GiveTask(c)
+	return c
+end
+
 ------------------------------------------------------------------
 -- 🚀  FIRE
 ------------------------------------------------------------------
@@ -130,22 +152,28 @@ function RemoteSignal.FireServer(eventName, ...)
 	getRemote(eventName):FireServer(...)
 end
 
--- Server ➜ one Client
+-- Server ➜ Client (one)
 function RemoteSignal.FireClient(eventName, player, ...)
 	assert(RunService:IsServer(), "FireClient only in Script")
 	getRemote(eventName):FireClient(player, ...)
 end
 
--- Server ➜ all Clients
+-- Server ➜ Client (all)
 function RemoteSignal.FireAll(eventName, ...)
 	assert(RunService:IsServer(), "FireAll only in Script")
 	getRemote(eventName):FireAllClients(...)
 end
 
--- Client-local broadcast (same device)
+-- Client ➜ Client (same device)
 function RemoteSignal.FireLocal(eventName, ...)
 	assert(RunService:IsClient(), "FireLocal only in LocalScript")
 	getBindable(eventName):Fire(...)
+end
+
+-- Server ➜ Server (same server)
+function RemoteSignal.FireServerLocal(eventName, ...)
+	assert(RunService:IsServer(), "FireServerLocal only in Script (server)")
+	getServerBindable(eventName):Fire(...)
 end
 
 ------------------------------------------------------------------
