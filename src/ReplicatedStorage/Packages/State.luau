@@ -71,7 +71,6 @@ function State:OnChange(key: string, callback: ChangeCallback): Connection
 		end,
 	}
 
-	self._maid:Give(connection)
 	return connection
 end
 

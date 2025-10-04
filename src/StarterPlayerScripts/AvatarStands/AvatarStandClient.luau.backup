@@ -1,0 +1,1439 @@
+--!strict
+--[[
+	Avatar Stand Client Manager
+	Handles client-side interactions, UI, and visual effects for Avatar Stands
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Import modules
+local Promise = require(ReplicatedStorage.Packages.Promise)
+local Signal = require(ReplicatedStorage.Packages.Signal)
+local State = require(ReplicatedStorage.Packages.State)
+local Maid = require(ReplicatedStorage.Packages.Maid)
+
+-- Import Avatar Stands modules
+local AvatarStandsTypes = require(ReplicatedStorage.AvatarStands.Types)
+local AvatarStandsConfig = require(ReplicatedStorage.AvatarStands.Config)
+local RemoteIds = require(ReplicatedStorage.Net.RemoteIds)
+
+type Promise<T> = typeof(Promise.new(function() end))
+type StandConfig = AvatarStandsTypes.StandConfig
+type UIState = AvatarStandsTypes.UIState
+type ViewMode = AvatarStandsTypes.ViewMode
+
+-- Event names for Signal system
+local CLIENT_EVENTS = {
+	STAND_DATA_RECEIVED = "StandDataReceived",
+	STAND_UPDATED = "StandUpdated",
+	INTERACTION_ZONE_ENTERED = "InteractionZoneEntered",
+	INTERACTION_ZONE_EXITED = "InteractionZoneExited",
+	UI_STATE_CHANGED = "UIStateChanged",
+}
+
+local AvatarStandClient = {}
+AvatarStandClient.__index = AvatarStandClient
+
+-- State Management - Individual state objects for better performance
+local stands = State.new({} :: {[string]: StandConfig})
+local activeStandId = State.new(nil :: string?)
+local isEditMode = State.new(false)
+local currentView = State.new("Gallery" :: ViewMode)
+local hasCreationPermissions = State.new(false)
+local isCustomizing = State.new(false)
+local selectedCategory = State.new(nil :: string?)
+
+-- Combined UI state getter function
+local function getUIState(): UIState
+	return {
+		activeStandId = activeStandId:Get(),
+		isEditMode = isEditMode:Get(),
+		isCustomizing = isCustomizing:Get(),
+		selectedCategory = selectedCategory:Get(),
+		currentView = currentView:Get(),
+	}
+end
+
+-- Helper functions to access state values
+local function getStands(): {[string]: StandConfig}
+	return stands:Get() or {}
+end
+
+local function getActiveStandId(): string?
+	return activeStandId:Get()
+end
+
+local function isInEditMode(): boolean
+	return isEditMode:Get()
+end
+
+local function getCurrentView(): ViewMode
+	return currentView:Get()
+end
+
+local function hasCreationPerms(): boolean
+	return hasCreationPermissions:Get()
+end
+
+local function getUIState(): UIState
+	return uiState:Get()
+end
+
+-- UI Elements
+local screenGui: ScreenGui?
+local mainFrame: Frame?
+local standInteractionUI: Frame?
+local createStandButton: TextButton?
+local maid = Maid.new()
+
+function AvatarStandClient.new()
+	local self = setmetatable({}, AvatarStandClient)
+
+	self:_initializeUI()
+	self:_setupStateConnections()
+	self:_setupInputHandling()
+	self:_setupNetworking()
+
+	return self
+end
+
+function AvatarStandClient:getStands(): {[string]: StandConfig}
+	return stands:Get() or {}
+end
+
+function AvatarStandClient:getActiveStand(): StandConfig?
+	local activeId = activeStandId:Get()
+	if activeId then
+		local currentStands = stands:Get() or {}
+		return currentStands[activeId]
+	end
+	return nil
+end
+
+function AvatarStandClient:setActiveStand(standId: string?)
+	activeStandId:Set(standId)
+end
+
+function AvatarStandClient:enterEditMode(standId: string)
+	self:setActiveStand(standId)
+	isEditMode:Set(true)
+	currentView:Set("Edit")
+	self:_showEditUI(standId)
+end
+
+function AvatarStandClient:exitEditMode()
+	isEditMode:Set(false)
+	currentView:Set("Gallery")
+	self:_hideEditUI()
+end
+
+function AvatarStandClient:openStandCustomization(standId: string)
+	self:setActiveStand(standId)
+	currentView:Set("Customize")
+	self:_showCustomizationUI(standId)
+end
+
+function AvatarStandClient:showStandDetails(standId: string)
+	self:setActiveStand(standId)
+	currentView:Set("Detailed")
+	self:_showDetailsUI(standId)
+end
+
+
+
+function AvatarStandClient:onStandInteractionZoneEntered(standId: string)
+	Signal.FireAll(CLIENT_EVENTS.INTERACTION_ZONE_ENTERED, standId)
+	self:_showInteractionPrompt(standId)
+end
+
+function AvatarStandClient:onStandInteractionZoneExited(standId: string)
+	Signal.FireAll(CLIENT_EVENTS.INTERACTION_ZONE_EXITED, standId)
+	self:_hideInteractionPrompt()
+end
+
+-- Private Methods
+
+function AvatarStandClient:_initializeUI()
+	-- Create main ScreenGui
+	screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "AvatarStandsUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+	-- Main container frame
+	mainFrame = Instance.new("Frame")
+	mainFrame.Name = "MainFrame"
+	mainFrame.Size = UDim2.fromScale(1, 1)
+	mainFrame.Position = UDim2.new(0, 0, 0, 0)
+	mainFrame.BackgroundTransparency = 1
+	mainFrame.Parent = screenGui
+
+	-- Stand Interaction UI (proximity-based)
+	standInteractionUI = self:_createInteractionUI()
+	standInteractionUI.Parent = mainFrame
+
+	-- Wait for PlayerGui to be ready
+	LocalPlayer:WaitForChild("PlayerGui")
+	screenGui.Parent = LocalPlayer.PlayerGui
+
+	maid:GiveTask(screenGui)
+end
+
+function AvatarStandClient:_createInteractionUI(): Frame
+	local interactionFrame = Instance.new("Frame")
+	interactionFrame.Name = "StandInteractionFrame"
+	interactionFrame.Size = UDim2.fromOffset(300, 150)
+	interactionFrame.Position = UDim2.new(0.5, -150, 0.8, -75)
+	interactionFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	interactionFrame.BackgroundTransparency = 0.1
+	interactionFrame.BorderSizePixel = 0
+	interactionFrame.Visible = false
+
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, AvatarStandsConfig.UI_CONFIG.panelCornerRadius)
+	corner.Parent = interactionFrame
+
+	-- Add drop shadow
+	local shadow = Instance.new("ImageLabel")
+	shadow.Name = "Shadow"
+	shadow.Size = UDim2.new(1, 20, 1, 20)
+	shadow.Position = UDim2.fromOffset(-10, -10)
+	shadow.BackgroundTransparency = 1
+	shadow.Image = "rbxasset://textures/ui/Controls/DropShadow.png"
+	shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+	shadow.ImageTransparency = 0.5
+	shadow.ScaleType = Enum.ScaleType.Slice
+	shadow.SliceCenter = Rect.new(12, 12, 52, 52)
+	shadow.ZIndex = interactionFrame.ZIndex - 1
+	shadow.Parent = interactionFrame
+
+	-- Title
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -20, 0, 30)
+	title.Position = UDim2.fromOffset(10, 10)
+	title.BackgroundTransparency = 1
+	title.Text = "Avatar Stand"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextScaled = true
+	title.Font = Enum.Font.GothamBold
+	title.Parent = interactionFrame
+
+	-- Buttons container
+	local buttonsFrame = Instance.new("Frame")
+	buttonsFrame.Name = "ButtonsFrame"
+	buttonsFrame.Size = UDim2.new(1, -20, 0, 80)
+	buttonsFrame.Position = UDim2.fromOffset(10, 50)
+	buttonsFrame.BackgroundTransparency = 1
+	buttonsFrame.Parent = interactionFrame
+
+	-- Button layout
+	local buttonLayout = Instance.new("UIGridLayout")
+	buttonLayout.CellSize = UDim2.fromScale(0.45, 0.45)
+	buttonLayout.CellPadding = UDim2.fromScale(0.05, 0.05)
+	buttonLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	buttonLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	buttonLayout.Parent = buttonsFrame
+
+	-- Create interaction buttons
+	local buttons = {
+		{text = "View", action = "view"},
+		{text = "Edit", action = "edit"},
+		{text = "Customize", action = "customize"},
+		{text = "Close", action = "close"},
+	}
+
+	for _, buttonData in buttons do
+		local button = self:_createButton(buttonData.text, buttonData.action)
+		button.Parent = buttonsFrame
+	end
+
+	return interactionFrame
+end
+
+function AvatarStandClient:_createButton(text: string, action: string): TextButton
+	local button = Instance.new("TextButton")
+	button.Name = text .. "Button"
+	button.Text = text
+	button.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	button.BorderSizePixel = 0
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
+	button.TextScaled = true
+	button.Font = Enum.Font.Gotham
+
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 4)
+	corner.Parent = button
+
+	-- Hover effects
+	local defaultTween = AvatarStandsConfig.UI_CONFIG.defaultTweenInfo
+
+	button.MouseEnter:Connect(function()
+		local hoverTween = TweenService:Create(
+			button,
+			defaultTween,
+			{
+				BackgroundColor3 = Color3.fromRGB(70, 70, 70),
+				Size = button.Size * AvatarStandsConfig.UI_CONFIG.buttonHoverScale
+			}
+		)
+		hoverTween:Play()
+	end)
+
+	button.MouseLeave:Connect(function()
+		local leaveTween = TweenService:Create(
+			button,
+			defaultTween,
+			{
+				BackgroundColor3 = Color3.fromRGB(50, 50, 50),
+				Size = button.Size / AvatarStandsConfig.UI_CONFIG.buttonHoverScale
+			}
+		)
+		leaveTween:Play()
+	end)
+
+	-- Button actions
+	button.Activated:Connect(function()
+		self:_handleButtonAction(action)
+	end)
+
+	return button
+end
+
+
+
+function AvatarStandClient:_showInteractionPrompt(standId: string)
+	if not standInteractionUI then return end
+
+	self:setActiveStand(standId)
+
+	-- Update title with stand info
+	local standConfig = stands:Get()[standId]
+	if standConfig then
+		local title = standInteractionUI:FindFirstChild("Title")
+		if title and title:IsA("TextLabel") then
+			title.Text = "Avatar Stand - " .. (standConfig.standType or "Basic")
+		end
+	end
+
+	-- Animate in
+	standInteractionUI.Visible = true
+	standInteractionUI.Position = UDim2.new(0.5, -150, 1, 0)
+
+	local slideInTween = TweenService:Create(
+		standInteractionUI,
+		TweenInfo.new(
+			AvatarStandsConfig.UI_CONFIG.fadeInDuration,
+			Enum.EasingStyle.Back,
+			Enum.EasingDirection.Out
+		),
+		{Position = UDim2.new(0.5, -150, 0.8, -75)}
+	)
+	slideInTween:Play()
+end
+
+function AvatarStandClient:_hideInteractionPrompt()
+	if not standInteractionUI or not standInteractionUI.Visible then return end
+
+	local slideOutTween = TweenService:Create(
+		standInteractionUI,
+		TweenInfo.new(
+			AvatarStandsConfig.UI_CONFIG.fadeOutDuration,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		),
+		{Position = UDim2.new(0.5, -150, 1, 0)}
+	)
+
+	slideOutTween:Play()
+	slideOutTween.Completed:Connect(function()
+		standInteractionUI.Visible = false
+	end)
+end
+
+function AvatarStandClient:_showEditUI(standId: string)
+	local standConfig = stands:Get()[standId]
+	if not standConfig then
+		warn(`Cannot show edit UI: Stand {standId} not found`)
+		return
+	end
+	
+	-- Create edit UI frame if it doesn't exist
+	if not mainFrame:FindFirstChild("EditFrame") then
+		self:_createEditUI()
+	end
+	
+	local editFrame = mainFrame:FindFirstChild("EditFrame")
+	if editFrame then
+		self:_populateEditUI(editFrame, standConfig)
+		editFrame.Visible = true
+		
+		-- Animate in
+		editFrame.Position = UDim2.new(0.5, -200, -0.5, 0)
+		local slideIn = TweenService:Create(
+			editFrame,
+			TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{Position = UDim2.new(0.5, -200, 0.5, -150)}
+		)
+		slideIn:Play()
+	end
+end
+
+function AvatarStandClient:_hideEditUI()
+	local editFrame = mainFrame and mainFrame:FindFirstChild("EditFrame")
+	if editFrame and editFrame.Visible then
+		local slideOut = TweenService:Create(
+			editFrame,
+			TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{Position = UDim2.new(0.5, -200, -0.5, 0)}
+		)
+		slideOut:Play()
+		slideOut.Completed:Connect(function()
+			editFrame.Visible = false
+		end)
+	end
+end
+
+function AvatarStandClient:_createEditUI(): Frame
+	local editFrame = Instance.new("Frame")
+	editFrame.Name = "EditFrame"
+	editFrame.Size = UDim2.fromOffset(400, 300)
+	editFrame.Position = UDim2.new(0.5, -200, 0.5, -150)
+	editFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	editFrame.BorderSizePixel = 0
+	editFrame.Visible = false
+	editFrame.Parent = mainFrame
+	
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = editFrame
+	
+	-- Title bar
+	local titleBar = Instance.new("Frame")
+	titleBar.Name = "TitleBar"
+	titleBar.Size = UDim2.new(1, 0, 0, 40)
+	titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	titleBar.BorderSizePixel = 0
+	titleBar.Parent = editFrame
+	
+	local titleCorner = Instance.new("UICorner")
+	titleCorner.CornerRadius = UDim.new(0, 8)
+	titleCorner.Parent = titleBar
+	
+	-- Title text
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Position = UDim2.fromOffset(10, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Edit Avatar Stand"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextScaled = true
+	title.Font = Enum.Font.GothamBold
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = titleBar
+	
+	-- Close button
+	local closeButton = Instance.new("TextButton")
+	closeButton.Name = "CloseButton"
+	closeButton.Size = UDim2.fromOffset(30, 30)
+	closeButton.Position = UDim2.new(1, -35, 0, 5)
+	closeButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+	closeButton.BorderSizePixel = 0
+	closeButton.Text = "X"
+	closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeButton.TextScaled = true
+	closeButton.Font = Enum.Font.GothamBold
+	closeButton.Parent = titleBar
+	
+	local closeCorner = Instance.new("UICorner")
+	closeCorner.CornerRadius = UDim.new(0, 4)
+	closeCorner.Parent = closeButton
+	
+	closeButton.Activated:Connect(function()
+		self:exitEditMode()
+	end)
+	
+	-- Content area
+	local contentFrame = Instance.new("ScrollingFrame")
+	contentFrame.Name = "ContentFrame"
+	contentFrame.Size = UDim2.new(1, -20, 1, -60)
+	contentFrame.Position = UDim2.fromOffset(10, 50)
+	contentFrame.BackgroundTransparency = 1
+	contentFrame.ScrollBarThickness = 8
+	contentFrame.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+	contentFrame.Parent = editFrame
+	
+	-- Layout for content
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 10)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = contentFrame
+	
+	-- Stand Name field
+	self:_createEditField(contentFrame, "Stand Name", "standName", "TextBox", 1)
+	
+	-- Position fields
+	self:_createEditField(contentFrame, "Position X", "positionX", "TextBox", 2)
+	self:_createEditField(contentFrame, "Position Y", "positionY", "TextBox", 3)
+	self:_createEditField(contentFrame, "Position Z", "positionZ", "TextBox", 4)
+	
+	-- Active toggle
+	self:_createEditField(contentFrame, "Active", "isActive", "CheckBox", 5)
+	
+	-- Save button
+	local saveButton = Instance.new("TextButton")
+	saveButton.Name = "SaveButton"
+	saveButton.Size = UDim2.new(1, 0, 0, 40)
+	saveButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+	saveButton.BorderSizePixel = 0
+	saveButton.Text = "Save Changes"
+	saveButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	saveButton.TextScaled = true
+	saveButton.Font = Enum.Font.GothamBold
+	saveButton.LayoutOrder = 10
+	saveButton.Parent = contentFrame
+	
+	local saveCorner = Instance.new("UICorner")
+	saveCorner.CornerRadius = UDim.new(0, 4)
+	saveCorner.Parent = saveButton
+	
+	saveButton.Activated:Connect(function()
+		self:_saveEditChanges()
+	end)
+	
+	return editFrame
+end
+
+function AvatarStandClient:_createEditField(parent: ScrollingFrame, labelText: string, fieldName: string, fieldType: string, layoutOrder: number)
+	local fieldFrame = Instance.new("Frame")
+	fieldFrame.Name = fieldName .. "Field"
+	fieldFrame.Size = UDim2.new(1, 0, 0, 60)
+	fieldFrame.BackgroundTransparency = 1
+	fieldFrame.LayoutOrder = layoutOrder
+	fieldFrame.Parent = parent
+	
+	local label = Instance.new("TextLabel")
+	label.Name = "Label"
+	label.Size = UDim2.new(1, 0, 0, 20)
+	label.BackgroundTransparency = 1
+	label.Text = labelText
+	label.TextColor3 = Color3.fromRGB(200, 200, 200)
+	label.TextScaled = true
+	label.Font = Enum.Font.Gotham
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = fieldFrame
+	
+	if fieldType == "TextBox" then
+		local textBox = Instance.new("TextBox")
+		textBox.Name = "Input"
+		textBox.Size = UDim2.new(1, 0, 0, 30)
+		textBox.Position = UDim2.fromOffset(0, 25)
+		textBox.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+		textBox.BorderSizePixel = 0
+		textBox.Text = ""
+		textBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+		textBox.TextScaled = true
+		textBox.Font = Enum.Font.Gotham
+		textBox.PlaceholderText = labelText
+		textBox.Parent = fieldFrame
+		
+		local inputCorner = Instance.new("UICorner")
+		inputCorner.CornerRadius = UDim.new(0, 4)
+		inputCorner.Parent = textBox
+		
+	elseif fieldType == "CheckBox" then
+		local checkBox = Instance.new("TextButton")
+		checkBox.Name = "Input"
+		checkBox.Size = UDim2.fromOffset(30, 30)
+		checkBox.Position = UDim2.fromOffset(0, 25)
+		checkBox.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+		checkBox.BorderSizePixel = 0
+		checkBox.Text = ""
+		checkBox.Parent = fieldFrame
+		
+		local checkCorner = Instance.new("UICorner")
+		checkCorner.CornerRadius = UDim.new(0, 4)
+		checkCorner.Parent = checkBox
+		
+		local checkMark = Instance.new("TextLabel")
+		checkMark.Name = "CheckMark"
+		checkMark.Size = UDim2.new(1, 0, 1, 0)
+		checkMark.BackgroundTransparency = 1
+		checkMark.Text = "✓"
+		checkMark.TextColor3 = Color3.fromRGB(50, 150, 50)
+		checkMark.TextScaled = true
+		checkMark.Visible = false
+		checkMark.Parent = checkBox
+		
+		checkBox.Activated:Connect(function()
+			checkMark.Visible = not checkMark.Visible
+			checkBox.BackgroundColor3 = checkMark.Visible and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
+		end)
+	end
+end
+
+function AvatarStandClient:_populateEditUI(editFrame: Frame, standConfig: StandConfig)
+	local contentFrame = editFrame:FindFirstChild("ContentFrame")
+	if not contentFrame then return end
+	
+	-- Populate fields with current stand data
+	local standNameField = contentFrame:FindFirstChild("standNameField")
+	if standNameField and standNameField:FindFirstChild("Input") then
+		standNameField.Input.Text = standConfig.standName or ""
+	end
+	
+	local posXField = contentFrame:FindFirstChild("positionXField")
+	if posXField and posXField:FindFirstChild("Input") then
+		posXField.Input.Text = tostring(standConfig.position.X)
+	end
+	
+	local posYField = contentFrame:FindFirstChild("positionYField")
+	if posYField and posYField:FindFirstChild("Input") then
+		posYField.Input.Text = tostring(standConfig.position.Y)
+	end
+	
+	local posZField = contentFrame:FindFirstChild("positionZField")
+	if posZField and posZField:FindFirstChild("Input") then
+		posZField.Input.Text = tostring(standConfig.position.Z)
+	end
+	
+	local activeField = contentFrame:FindFirstChild("isActiveField")
+	if activeField and activeField:FindFirstChild("Input") then
+		local checkMark = activeField.Input:FindFirstChild("CheckMark")
+		if checkMark then
+			checkMark.Visible = standConfig.isActive
+			activeField.Input.BackgroundColor3 = standConfig.isActive and Color3.fromRGB(50, 150, 50) or Color3.fromRGB(60, 60, 60)
+		end
+	end
+	
+	-- Update content frame size for scrolling
+	contentFrame.CanvasSize = UDim2.new(0, 0, 0, contentFrame.UIListLayout.AbsoluteContentSize.Y + 20)
+end
+
+function AvatarStandClient:_saveEditChanges()
+	local activeId = activeStandId:Get()
+	if not activeId then return end
+	
+	local editFrame = mainFrame:FindFirstChild("EditFrame")
+	if not editFrame then return end
+	
+	local contentFrame = editFrame:FindFirstChild("ContentFrame")
+	if not contentFrame then return end
+	
+	-- Gather data from UI fields
+	local newConfig = {}
+	local currentStands = stands:Get()
+	local currentConfig = currentStands[activeId]
+	
+	if currentConfig then
+		-- Start with current config
+		for key, value in currentConfig do
+			newConfig[key] = value
+		end
+		
+		-- Update with new values from UI
+		local standNameField = contentFrame:FindFirstChild("standNameField")
+		if standNameField and standNameField:FindFirstChild("Input") then
+			newConfig.standName = standNameField.Input.Text
+		end
+		
+		local posXField = contentFrame:FindFirstChild("positionXField")
+		local posYField = contentFrame:FindFirstChild("positionYField")
+		local posZField = contentFrame:FindFirstChild("positionZField")
+		
+		if posXField and posYField and posZField then
+			local x = tonumber(posXField:FindFirstChild("Input").Text) or currentConfig.position.X
+			local y = tonumber(posYField:FindFirstChild("Input").Text) or currentConfig.position.Y
+			local z = tonumber(posZField:FindFirstChild("Input").Text) or currentConfig.position.Z
+			newConfig.position = Vector3.new(x, y, z)
+		end
+		
+		local activeField = contentFrame:FindFirstChild("isActiveField")
+		if activeField and activeField:FindFirstChild("Input") then
+			local checkMark = activeField.Input:FindFirstChild("CheckMark")
+			if checkMark then
+				newConfig.isActive = checkMark.Visible
+			end
+		end
+		
+		-- Update timestamp
+		newConfig.lastUpdated = DateTime.now().UnixTimestamp
+		
+		-- Send update to server
+		self:updateStandConfig(activeId, newConfig)
+		
+		print(`Saving changes for stand {activeId}`)
+		self:exitEditMode()
+	end
+end
+
+function AvatarStandClient:_showCustomizationUI(standId: string)
+	-- Simple placeholder customization UI
+	print("Showing customization UI for stand:", standId)
+	
+	-- Create a simple notification for now
+	if screenGui then
+		local notification = Instance.new("Frame")
+		notification.Name = "CustomizationNotification"
+		notification.Size = UDim2.fromOffset(300, 100)
+		notification.Position = UDim2.new(0.5, -150, 0.1, 0)
+		notification.BackgroundColor3 = Color3.fromRGB(50, 100, 200)
+		notification.BorderSizePixel = 0
+		notification.Parent = screenGui
+		
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 8)
+		corner.Parent = notification
+		
+		local text = Instance.new("TextLabel")
+		text.Size = UDim2.new(1, -20, 1, -20)
+		text.Position = UDim2.fromOffset(10, 10)
+		text.BackgroundTransparency = 1
+		text.Text = "Customization UI\nComing Soon!"
+		text.TextColor3 = Color3.fromRGB(255, 255, 255)
+		text.TextScaled = true
+		text.Font = Enum.Font.GothamBold
+		text.Parent = notification
+		
+		-- Auto-hide after 3 seconds
+		task.wait(3)
+		notification:Destroy()
+	end
+end
+
+function AvatarStandClient:_showDetailsUI(standId: string)
+	local standConfig = stands:Get()[standId]
+	if not standConfig then
+		warn(`Cannot show details UI: Stand {standId} not found`)
+		return
+	end
+	
+	-- Create details UI frame if it doesn't exist
+	if not mainFrame:FindFirstChild("DetailsFrame") then
+		self:_createDetailsUI()
+	end
+	
+	local detailsFrame = mainFrame:FindFirstChild("DetailsFrame")
+	if detailsFrame then
+		self:_populateDetailsUI(detailsFrame, standConfig)
+		detailsFrame.Visible = true
+		
+		-- Animate in
+		detailsFrame.Position = UDim2.new(0.5, -200, -0.5, 0)
+		local slideIn = TweenService:Create(
+			detailsFrame,
+			TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{Position = UDim2.new(0.5, -200, 0.5, -150)}
+		)
+		slideIn:Play()
+	end
+end
+
+function AvatarStandClient:_createDetailsUI(): Frame
+	local detailsFrame = Instance.new("Frame")
+	detailsFrame.Name = "DetailsFrame"
+	detailsFrame.Size = UDim2.fromOffset(400, 300)
+	detailsFrame.Position = UDim2.new(0.5, -200, 0.5, -150)
+	detailsFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	detailsFrame.BorderSizePixel = 0
+	detailsFrame.Visible = false
+	detailsFrame.Parent = mainFrame
+	
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = detailsFrame
+	
+	-- Title bar (similar to edit UI)
+	local titleBar = Instance.new("Frame")
+	titleBar.Name = "TitleBar"
+	titleBar.Size = UDim2.new(1, 0, 0, 40)
+	titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	titleBar.BorderSizePixel = 0
+	titleBar.Parent = detailsFrame
+	
+	local titleCorner = Instance.new("UICorner")
+	titleCorner.CornerRadius = UDim.new(0, 8)
+	titleCorner.Parent = titleBar
+	
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Position = UDim2.fromOffset(10, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Stand Details"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextScaled = true
+	title.Font = Enum.Font.GothamBold
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = titleBar
+	
+	-- Close button
+	local closeButton = Instance.new("TextButton")
+	closeButton.Name = "CloseButton"
+	closeButton.Size = UDim2.fromOffset(30, 30)
+	closeButton.Position = UDim2.new(1, -35, 0, 5)
+	closeButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+	closeButton.BorderSizePixel = 0
+	closeButton.Text = "X"
+	closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeButton.TextScaled = true
+	closeButton.Font = Enum.Font.GothamBold
+	closeButton.Parent = titleBar
+	
+	local closeCorner = Instance.new("UICorner")
+	closeCorner.CornerRadius = UDim.new(0, 4)
+	closeCorner.Parent = closeButton
+	
+	closeButton.Activated:Connect(function()
+		detailsFrame.Visible = false
+		currentView:Set("Gallery")
+	end)
+	
+	-- Content area
+	local contentFrame = Instance.new("ScrollingFrame")
+	contentFrame.Name = "ContentFrame"
+	contentFrame.Size = UDim2.new(1, -20, 1, -60)
+	contentFrame.Position = UDim2.fromOffset(10, 50)
+	contentFrame.BackgroundTransparency = 1
+	contentFrame.ScrollBarThickness = 8
+	contentFrame.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+	contentFrame.Parent = detailsFrame
+	
+	-- Layout for content
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 10)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = contentFrame
+	
+	return detailsFrame
+end
+
+function AvatarStandClient:_populateDetailsUI(detailsFrame: Frame, standConfig: StandConfig)
+	local contentFrame = detailsFrame:FindFirstChild("ContentFrame")
+	if not contentFrame then return end
+	
+	-- Clear existing details
+	for _, child in contentFrame:GetChildren() do
+		if child:IsA("Frame") and child.Name:find("Detail") then
+			child:Destroy()
+		end
+	end
+	
+	-- Create detail fields
+	local details = {
+		{"Stand Name", standConfig.standName or "Unknown"},
+		{"Stand ID", standConfig.standId},
+		{"Position", string.format("%.1f, %.1f, %.1f", standConfig.position.X, standConfig.position.Y, standConfig.position.Z)},
+		{"Active", standConfig.isActive and "Yes" or "No"},
+		{"Created", DateTime.fromUnixTimestamp(standConfig.createdAt):FormatLocalTime("LTS", "en-us")},
+		{"Last Updated", DateTime.fromUnixTimestamp(standConfig.lastUpdated):FormatLocalTime("LTS", "en-us")},
+		{"Persistent", standConfig.isPersistent and "Yes" or "No"},
+		{"Version", tostring(standConfig.version)},
+	}
+	
+	for i, detail in details do
+		self:_createDetailField(contentFrame, detail[1], detail[2], i)
+	end
+	
+	-- Update content frame size for scrolling
+	contentFrame.CanvasSize = UDim2.new(0, 0, 0, contentFrame.UIListLayout.AbsoluteContentSize.Y + 20)
+end
+
+function AvatarStandClient:_createDetailField(parent: ScrollingFrame, labelText: string, valueText: string, layoutOrder: number)
+	local fieldFrame = Instance.new("Frame")
+	fieldFrame.Name = "Detail" .. layoutOrder
+	fieldFrame.Size = UDim2.new(1, 0, 0, 50)
+	fieldFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+	fieldFrame.BorderSizePixel = 0
+	fieldFrame.LayoutOrder = layoutOrder
+	fieldFrame.Parent = parent
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 4)
+	corner.Parent = fieldFrame
+	
+	local label = Instance.new("TextLabel")
+	label.Name = "Label"
+	label.Size = UDim2.new(0.4, -10, 1, 0)
+	label.Position = UDim2.fromOffset(10, 0)
+	label.BackgroundTransparency = 1
+	label.Text = labelText .. ":"
+	label.TextColor3 = Color3.fromRGB(200, 200, 200)
+	label.TextScaled = true
+	label.Font = Enum.Font.GothamBold
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = fieldFrame
+	
+	local value = Instance.new("TextLabel")
+	value.Name = "Value"
+	value.Size = UDim2.new(0.6, -10, 1, 0)
+	value.Position = UDim2.new(0.4, 0, 0, 0)
+	value.BackgroundTransparency = 1
+	value.Text = valueText
+	value.TextColor3 = Color3.fromRGB(255, 255, 255)
+	value.TextScaled = true
+	value.Font = Enum.Font.Gotham
+	value.TextXAlignment = Enum.TextXAlignment.Left
+	value.Parent = fieldFrame
+end
+
+function AvatarStandClient:_setupStateConnections()
+	-- React to UI state changes
+	maid:GiveTask(uiState:OnChanged(function(newState)
+		Signal.FireAll(CLIENT_EVENTS.UI_STATE_CHANGED, newState)
+	end))
+
+	-- React to stands data changes
+	maid:GiveTask(stands:OnChanged(function(newStands)
+		Signal.FireAll(CLIENT_EVENTS.STAND_DATA_RECEIVED, newStands)
+	end))
+end
+
+function AvatarStandClient:_setupInputHandling()
+	-- Handle escape key to close UIs
+	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+
+		if input.KeyCode == Enum.KeyCode.Escape then
+			if isEditMode:Get() then
+				self:exitEditMode()
+			elseif standInteractionUI and standInteractionUI.Visible then
+				self:_hideInteractionPrompt()
+			end
+		end
+	end)
+end
+
+function AvatarStandClient:_setupNetworking()
+	-- Listen for stand data from server
+	maid:GiveSignal(Signal.OnClient(RemoteIds.STAND_DATA_SYNC):Connect(function(standId: string, standConfig: StandConfig)
+		self:_updateStandData(standId, standConfig)
+	end))
+	
+	-- Listen for interaction zone state changes
+	maid:GiveSignal(Signal.OnClient(RemoteIds.INTERACTION_ZONE_STATE):Connect(function(standId: string, state: string)
+		if state == "entered" then
+			self:onStandInteractionZoneEntered(standId)
+		elseif state == "exited" then
+			self:onStandInteractionZoneExited(standId)
+		end
+	end))
+	
+	-- Listen for stand creation events
+	maid:GiveSignal(Signal.OnClient(RemoteIds.STAND_CREATED):Connect(function(standId: string, standConfig: StandConfig)
+		self:_updateStandData(standId, standConfig)
+		print(`New stand created: {standId}`)
+	end))
+	
+	-- Listen for stand removal events
+	maid:GiveSignal(Signal.OnClient(RemoteIds.STAND_REMOVED):Connect(function(standId: string)
+		self:_removeStandData(standId)
+		print(`Stand removed: {standId}`)
+	end))
+	
+	-- Listen for stand updates
+	maid:GiveSignal(Signal.OnClient(RemoteIds.STAND_UPDATED):Connect(function(standId: string, standConfig: StandConfig)
+		self:_updateStandData(standId, standConfig)
+		print(`Stand updated: {standId}`)
+	end))
+	
+	-- Listen for avatar updates
+	maid:GiveSignal(Signal.OnClient(RemoteIds.AVATAR_UPDATED):Connect(function(standId: string, avatarData: any)
+		local currentStands = stands:Get()
+		if currentStands[standId] then
+			-- Update the avatar data for this stand
+			currentStands[standId].avatarData = avatarData
+			stands:Set(currentStands)
+			print(`Avatar updated for stand: {standId}`)
+		end
+	end))
+	
+	-- Set up creation system networking
+	self:_setupCreationNetworking()
+	
+	-- Request initial stand data when client starts
+	self:requestNearbyStands()
+end
+
+function AvatarStandClient:_setupCreationNetworking()
+	-- Listen for permission check responses
+	maid:GiveSignal(Signal.OnClient(RemoteIds.PERMISSION_CHECK_RESPONSE):Connect(function(hasPermission: boolean)
+		hasCreationPermissions:Set(hasPermission)
+		self:_updateCreationUI(hasPermission)
+	end))
+	
+	-- Listen for stand creation responses
+	maid:GiveSignal(Signal.OnClient(RemoteIds.CREATE_STAND_RESPONSE):Connect(function(success: boolean, message: string, standId: string?)
+		if success and standId then
+			print(`Stand created successfully: {standId}`)
+			self:_hideCreationWizard()
+			-- Auto-show the new stand details
+			task.wait(0.5) -- Small delay to let the stand data sync
+			self:showStandDetails(standId)
+		else
+			warn(`Stand creation failed: {message}`)
+			self:_showCreationError(message)
+		end
+	end))
+	
+	-- Check permissions on startup
+	self:_checkCreationPermissions()
+	
+	-- Create creation UI
+	self:_createCreationUI()
+end
+
+function AvatarStandClient:_checkCreationPermissions()
+	Signal.FireServer(RemoteIds.CHECK_PERMISSIONS)
+end
+
+function AvatarStandClient:_createCreationUI()
+	-- Create floating "Create Stand" button
+	createStandButton = Instance.new("TextButton")
+	createStandButton.Name = "CreateStandButton"
+	createStandButton.Size = UDim2.fromOffset(120, 40)
+	createStandButton.Position = UDim2.new(1, -140, 0, 20)
+	createStandButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+	createStandButton.BorderSizePixel = 0
+	createStandButton.Text = "Create Stand"
+	createStandButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	createStandButton.TextScaled = true
+	createStandButton.Font = Enum.Font.GothamBold
+	createStandButton.Visible = false -- Hidden until permissions are checked
+	createStandButton.Parent = mainFrame
+	
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = createStandButton
+	
+	-- Hover effects
+	local defaultTween = AvatarStandsConfig.UI_CONFIG.defaultTweenInfo
+	
+	createStandButton.MouseEnter:Connect(function()
+		local hoverTween = TweenService:Create(
+			createStandButton,
+			defaultTween,
+			{
+				BackgroundColor3 = Color3.fromRGB(70, 180, 70),
+				Size = UDim2.fromOffset(125, 42)
+			}
+		)
+		hoverTween:Play()
+	end)
+	
+	createStandButton.MouseLeave:Connect(function()
+		local leaveTween = TweenService:Create(
+			createStandButton,
+			defaultTween,
+			{
+				BackgroundColor3 = Color3.fromRGB(50, 150, 50),
+				Size = UDim2.fromOffset(120, 40)
+			}
+		)
+		leaveTween:Play()
+	end)
+	
+	-- Button click handler
+	createStandButton.Activated:Connect(function()
+		self:_showCreationWizard()
+	end)
+	
+	maid:GiveTask(createStandButton)
+end
+
+function AvatarStandClient:_updateCreationUI(hasPermission: boolean)
+	if createStandButton then
+		createStandButton.Visible = hasPermission
+	end
+end
+
+function AvatarStandClient:_showCreationWizard()
+	-- Create creation wizard if it doesn't exist
+	if not mainFrame:FindFirstChild("CreationWizard") then
+		self:_createCreationWizard()
+	end
+	
+	local wizardFrame = mainFrame:FindFirstChild("CreationWizard")
+	if wizardFrame then
+		wizardFrame.Visible = true
+		
+		-- Reset wizard state
+		local nameInput = wizardFrame:FindFirstChild("ContentFrame"):FindFirstChild("StandNameInput")
+		if nameInput then
+			nameInput.Text = ""
+		end
+		
+		-- Animate in
+		wizardFrame.Position = UDim2.new(0.5, -200, -0.5, 0)
+		local slideIn = TweenService:Create(
+			wizardFrame,
+			TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{Position = UDim2.new(0.5, -200, 0.5, -100)}
+		)
+		slideIn:Play()
+	end
+end
+
+function AvatarStandClient:_hideCreationWizard()
+	local wizardFrame = mainFrame:FindFirstChild("CreationWizard")
+	if wizardFrame and wizardFrame.Visible then
+		local slideOut = TweenService:Create(
+			wizardFrame,
+			TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{Position = UDim2.new(0.5, -200, -0.5, 0)}
+		)
+		slideOut:Play()
+		slideOut.Completed:Connect(function()
+			wizardFrame.Visible = false
+		end)
+	end
+end
+
+function AvatarStandClient:_createCreationWizard(): Frame
+	local wizardFrame = Instance.new("Frame")
+	wizardFrame.Name = "CreationWizard"
+	wizardFrame.Size = UDim2.fromOffset(400, 200)
+	wizardFrame.Position = UDim2.new(0.5, -200, 0.5, -100)
+	wizardFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+	wizardFrame.BorderSizePixel = 0
+	wizardFrame.Visible = false
+	wizardFrame.Parent = mainFrame
+	
+	-- Add corner radius
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = wizardFrame
+	
+	-- Title bar
+	local titleBar = Instance.new("Frame")
+	titleBar.Name = "TitleBar"
+	titleBar.Size = UDim2.new(1, 0, 0, 40)
+	titleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	titleBar.BorderSizePixel = 0
+	titleBar.Parent = wizardFrame
+	
+	local titleCorner = Instance.new("UICorner")
+	titleCorner.CornerRadius = UDim.new(0, 8)
+	titleCorner.Parent = titleBar
+	
+	-- Title text
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Position = UDim2.fromOffset(10, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Create New Avatar Stand"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextScaled = true
+	title.Font = Enum.Font.GothamBold
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = titleBar
+	
+	-- Close button
+	local closeButton = Instance.new("TextButton")
+	closeButton.Name = "CloseButton"
+	closeButton.Size = UDim2.fromOffset(30, 30)
+	closeButton.Position = UDim2.new(1, -35, 0, 5)
+	closeButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+	closeButton.BorderSizePixel = 0
+	closeButton.Text = "X"
+	closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeButton.TextScaled = true
+	closeButton.Font = Enum.Font.GothamBold
+	closeButton.Parent = titleBar
+	
+	local closeCorner = Instance.new("UICorner")
+	closeCorner.CornerRadius = UDim.new(0, 4)
+	closeCorner.Parent = closeButton
+	
+	closeButton.Activated:Connect(function()
+		self:_hideCreationWizard()
+	end)
+	
+	-- Content frame
+	local contentFrame = Instance.new("Frame")
+	contentFrame.Name = "ContentFrame"
+	contentFrame.Size = UDim2.new(1, -20, 1, -60)
+	contentFrame.Position = UDim2.fromOffset(10, 50)
+	contentFrame.BackgroundTransparency = 1
+	contentFrame.Parent = wizardFrame
+	
+	-- Stand name label
+	local nameLabel = Instance.new("TextLabel")
+	nameLabel.Name = "StandNameLabel"
+	nameLabel.Size = UDim2.new(1, 0, 0, 25)
+	nameLabel.Position = UDim2.fromOffset(0, 10)
+	nameLabel.BackgroundTransparency = 1
+	nameLabel.Text = "Stand Name:"
+	nameLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+	nameLabel.TextScaled = true
+	nameLabel.Font = Enum.Font.Gotham
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	nameLabel.Parent = contentFrame
+	
+	-- Stand name input
+	local nameInput = Instance.new("TextBox")
+	nameInput.Name = "StandNameInput"
+	nameInput.Size = UDim2.new(1, 0, 0, 35)
+	nameInput.Position = UDim2.fromOffset(0, 40)
+	nameInput.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	nameInput.BorderSizePixel = 0
+	nameInput.Text = ""
+	nameInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+	nameInput.TextScaled = true
+	nameInput.Font = Enum.Font.Gotham
+	nameInput.PlaceholderText = "Enter stand name..."
+	nameInput.Parent = contentFrame
+	
+	local inputCorner = Instance.new("UICorner")
+	inputCorner.CornerRadius = UDim.new(0, 4)
+	inputCorner.Parent = nameInput
+	
+	-- Position info label
+	local positionLabel = Instance.new("TextLabel")
+	positionLabel.Name = "PositionLabel"
+	positionLabel.Size = UDim2.new(1, 0, 0, 20)
+	positionLabel.Position = UDim2.fromOffset(0, 85)
+	positionLabel.BackgroundTransparency = 1
+	positionLabel.Text = "Stand will be created at your current position"
+	positionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+	positionLabel.TextScaled = true
+	positionLabel.Font = Enum.Font.Gotham
+	positionLabel.TextXAlignment = Enum.TextXAlignment.Center
+	positionLabel.Parent = contentFrame
+	
+	-- Button container
+	local buttonContainer = Instance.new("Frame")
+	buttonContainer.Name = "ButtonContainer"
+	buttonContainer.Size = UDim2.new(1, 0, 0, 40)
+	buttonContainer.Position = UDim2.fromOffset(0, 115)
+	buttonContainer.BackgroundTransparency = 1
+	buttonContainer.Parent = contentFrame
+	
+	-- Cancel button
+	local cancelButton = Instance.new("TextButton")
+	cancelButton.Name = "CancelButton"
+	cancelButton.Size = UDim2.new(0.45, 0, 1, 0)
+	cancelButton.Position = UDim2.new(0, 0, 0, 0)
+	cancelButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+	cancelButton.BorderSizePixel = 0
+	cancelButton.Text = "Cancel"
+	cancelButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	cancelButton.TextScaled = true
+	cancelButton.Font = Enum.Font.Gotham
+	cancelButton.Parent = buttonContainer
+	
+	local cancelCorner = Instance.new("UICorner")
+	cancelCorner.CornerRadius = UDim.new(0, 4)
+	cancelCorner.Parent = cancelButton
+	
+	cancelButton.Activated:Connect(function()
+		self:_hideCreationWizard()
+	end)
+	
+	-- Create button
+	local createButton = Instance.new("TextButton")
+	createButton.Name = "CreateButton"
+	createButton.Size = UDim2.new(0.45, 0, 1, 0)
+	createButton.Position = UDim2.new(0.55, 0, 0, 0)
+	createButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+	createButton.BorderSizePixel = 0
+	createButton.Text = "Create Stand"
+	createButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	createButton.TextScaled = true
+	createButton.Font = Enum.Font.GothamBold
+	createButton.Parent = buttonContainer
+	
+	local createCorner = Instance.new("UICorner")
+	createCorner.CornerRadius = UDim.new(0, 4)
+	createCorner.Parent = createButton
+	
+	createButton.Activated:Connect(function()
+		self:_handleStandCreation()
+	end)
+	
+	return wizardFrame
+end
+
+function AvatarStandClient:_handleStandCreation()
+	local wizardFrame = mainFrame:FindFirstChild("CreationWizard")
+	if not wizardFrame then return end
+	
+	local contentFrame = wizardFrame:FindFirstChild("ContentFrame")
+	if not contentFrame then return end
+	
+	local nameInput = contentFrame:FindFirstChild("StandNameInput")
+	if not nameInput then return end
+	
+	local standName = nameInput.Text:gsub("^%s*(.-)%s*$", "%1") -- Trim whitespace
+	
+	-- Validate input
+	if standName == "" then
+		self:_showCreationError("Please enter a stand name")
+		return
+	end
+	
+	if #standName > 50 then
+		self:_showCreationError("Stand name must be 50 characters or less")
+		return
+	end
+	
+	-- Get player position
+	local character = LocalPlayer.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then
+		self:_showCreationError("Cannot get player position")
+		return
+	end
+	
+	local position = character.HumanoidRootPart.Position
+	
+	-- Send creation request to server
+	Signal.FireServer(RemoteIds.CREATE_STAND_REQUEST, standName, position)
+	
+	-- Disable create button and show loading state
+	local createButton = contentFrame:FindFirstChild("ButtonContainer"):FindFirstChild("CreateButton")
+	if createButton then
+		createButton.Text = "Creating..."
+		createButton.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+		createButton.Active = false
+	end
+end
+
+function AvatarStandClient:_showCreationError(message: string)
+	local wizardFrame = mainFrame:FindFirstChild("CreationWizard")
+	if not wizardFrame then return end
+	
+	-- Remove existing error message
+	local existingError = wizardFrame:FindFirstChild("ErrorMessage")
+	if existingError then
+		existingError:Destroy()
+	end
+	
+	-- Create error message
+	local errorFrame = Instance.new("Frame")
+	errorFrame.Name = "ErrorMessage"
+	errorFrame.Size = UDim2.new(1, -20, 0, 30)
+	errorFrame.Position = UDim2.new(0, 10, 1, -40)
+	errorFrame.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+	errorFrame.BorderSizePixel = 0
+	errorFrame.Parent = wizardFrame
+	
+	local errorCorner = Instance.new("UICorner")
+	errorCorner.CornerRadius = UDim.new(0, 4)
+	errorCorner.Parent = errorFrame
+	
+	local errorText = Instance.new("TextLabel")
+	errorText.Name = "ErrorText"
+	errorText.Size = UDim2.new(1, -10, 1, 0)
+	errorText.Position = UDim2.fromOffset(5, 0)
+	errorText.BackgroundTransparency = 1
+	errorText.Text = message
+	errorText.TextColor3 = Color3.fromRGB(255, 255, 255)
+	errorText.TextScaled = true
+	errorText.Font = Enum.Font.Gotham
+	errorText.Parent = errorFrame
+	
+	-- Auto-hide error after 5 seconds
+	task.spawn(function()
+		task.wait(5)
+		if errorFrame and errorFrame.Parent then
+			errorFrame:Destroy()
+		end
+	end)
+	
+	-- Reset create button
+	local contentFrame = wizardFrame:FindFirstChild("ContentFrame")
+	if contentFrame then
+		local createButton = contentFrame:FindFirstChild("ButtonContainer"):FindFirstChild("CreateButton")
+		if createButton then
+			createButton.Text = "Create Stand"
+			createButton.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+			createButton.Active = true
+		end
+	end
+end
+
+-- Helper methods for networking
+
+function AvatarStandClient:_updateStandData(standId: string, standConfig: StandConfig)
+	local currentStands = stands:Get()
+	currentStands[standId] = standConfig
+	stands:Set(currentStands)
+end
+
+function AvatarStandClient:_removeStandData(standId: string)
+	local currentStands = stands:Get()
+	currentStands[standId] = nil
+	stands:Set(currentStands)
+	
+	-- If this was the active stand, clear it
+	if activeStandId:Get() == standId then
+		activeStandId:Set(nil)
+		self:exitEditMode()
+	end
+end
+
+function AvatarStandClient:requestStandData(standId: string?)
+	Signal.FireServer(RemoteIds.REQUEST_STAND_DATA, standId)
+end
+
+function AvatarStandClient:requestNearbyStands(range: number?)
+	if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+		local position = LocalPlayer.Character.HumanoidRootPart.Position
+		Signal.FireServer(RemoteIds.REQUEST_NEARBY_STANDS, position, range or 100)
+	end
+end
+
+function AvatarStandClient:interactWithStand(standId: string, interactionType: string)
+	Signal.FireServer(RemoteIds.INTERACT_WITH_STAND, standId, interactionType)
+end
+
+function AvatarStandClient:updateStandConfig(standId: string, newConfig: StandConfig)
+	Signal.FireServer(RemoteIds.UPDATE_STAND_CONFIG, standId, newConfig)
+end
+
+function AvatarStandClient:updateAvatarData(standId: string, avatarData: any)
+	Signal.FireServer(RemoteIds.UPDATE_AVATAR_DATA, standId, avatarData)
+end
+
+-- Update the button action handler to use networking
+function AvatarStandClient:_handleButtonAction(action: string)
+	local activeId = activeStandId:Get()
+
+	if action == "view" and activeId then
+		self:interactWithStand(activeId, "view")
+		self:showStandDetails(activeId)
+	elseif action == "edit" and activeId then
+		self:interactWithStand(activeId, "edit")
+		self:enterEditMode(activeId)
+	elseif action == "customize" and activeId then
+		self:interactWithStand(activeId, "customize")
+		self:openStandCustomization(activeId)
+	elseif action == "close" then
+		self:_hideInteractionPrompt()
+	end
+end
+
+-- Export module state for external use
+AvatarStandClient.State = {
+	stands = stands,
+	activeStandId = activeStandId,
+	isEditMode = isEditMode,
+	currentView = currentView,
+	hasCreationPermissions = hasCreationPermissions,
+	uiState = uiState,
+}
+
+return AvatarStandClient

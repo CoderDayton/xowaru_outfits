@@ -63,7 +63,7 @@ end
 
 -- Promise-based version
 function Backoff.RetryAsync<T>(fn: RetryFunction<T>, config: BackoffConfig?): any
-	local Promise = require(script.Parent.Promise)
+	local Promise = require(game.ReplicatedStorage.Packages.Promise)
 
 	return Promise.new(function(resolve, reject)
 		local result: T? = Backoff.Retry(fn, config)

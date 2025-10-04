@@ -41,11 +41,6 @@ type AvatarDisplay = AvatarStandsTypes.AvatarDisplay
 type PersistedStandData = AvatarStandsTypes.PersistedStandData
 
 -- Event names for Signal system (CAREFULLY MANAGED)
--- Permission system constants
-local AUTHORIZED_CREATORS = {
-	[2006060772] = true, -- User ID - full permissions for UI access
-}
-
 local STAND_EVENTS = {
 	-- CRITICAL EVENTS (Global broadcast necessary)
 	STAND_CREATED = "StandCreated", -- New stand created, all clients need to know
@@ -125,18 +120,21 @@ function AvatarStandManager.new()
 
 		-- Set up player connections using Signal system and wrap with systemMaid
 		-- NOTE: Using OnClient for player events is correct here - these are Roblox player events
-	systemMaid:Give(Signal.OnServerLocal("PlayerAdded"):Connect(function(player)
-		playersInZones[player.UserId] = {}
-		print(`👤 Player {player.Name} added to stand tracking`)
-	end))
+		systemMaid:GiveTask(Signal.OnServerLocal("PlayerAdded"):Connect(function(player)
+			playersInZones[player.UserId] = {}
+			print(`👤 Player {player.Name} added to stand tracking`)
+		end))
 
-	systemMaid:Give(Signal.OnServerLocal("PlayerRemoving"):Connect(function(player)
-		playersInZones[player.UserId] = nil
-		-- Note: No longer cleaning up player stands since all stands are server-owned
-		print(`👤 Player {player.Name} removed from stand tracking`)
-	end))
+		systemMaid:GiveTask(Signal.OnServerLocal("PlayerRemoving"):Connect(function(player)
+			playersInZones[player.UserId] = nil
+			-- Note: No longer cleaning up player stands since all stands are server-owned
+			print(`👤 Player {player.Name} removed from stand tracking`)
+		end))
 
-	-- Permission system is now defined at module level
+	-- Set up permission system constants
+	local AUTHORIZED_CREATORS = {
+		[2006060772] = true, -- Your user ID - full permissions
+	}
 
 	-- Load persistent stands from storage
 	self:_loadPersistentStands()
@@ -146,10 +144,10 @@ function AvatarStandManager.new()
 
 	-- Set up server-client networking
 	self:_setupNetworking()
-
+	
 	-- Set up permission/creation system networking
 	self:_setupCreationNetworking()
-
+	
 	-- Store system maid for cleanup
 	self._systemMaid = systemMaid
 
@@ -210,7 +208,7 @@ function AvatarStandManager:createStand(config: StandConfig): Promise<string>
 		end)
 
 		-- Fire stand creation event (Global - all clients need to know)
-		Signal.FireServerLocal(STAND_EVENTS.STAND_CREATED, config)
+		Signal.FireAll(STAND_EVENTS.STAND_CREATED, config)
 
 		-- Update metrics
 		performanceMetrics.standsCreated += 1
@@ -278,7 +276,7 @@ function AvatarStandManager:removeStand(standId: string): Promise<boolean>
 		end)
 
 		-- Fire stand removal event (Global - all clients need to know)
-		Signal.FireServerLocal(STAND_EVENTS.STAND_REMOVED, {standId = standId})
+		Signal.FireAll(STAND_EVENTS.STAND_REMOVED, {standId = standId})
 
 		resolve(true)
 	end)
@@ -439,14 +437,14 @@ function AvatarStandManager:_loadAvatarOnStand(standId: string, avatarData: Avat
 		-- Load avatar body parts using InsertService
 		local InsertService = game:GetService("InsertService")
 		local TweenService = game:GetService("TweenService")
-
+		
 		local bodyParts = {}
 		local loadPromises = {}
 
 		-- Standard R15 body part asset IDs (free assets from Roblox)
 		local defaultBodyPartIds = {
 			head = 13421774, -- Default Head
-			torso = 13421786, -- Default Torso
+			torso = 13421786, -- Default Torso  
 			leftArm = 13421767, -- Default Left Arm
 			rightArm = 13421773, -- Default Right Arm
 			leftLeg = 13421769, -- Default Left Leg
@@ -469,7 +467,7 @@ function AvatarStandManager:_loadAvatarOnStand(standId: string, avatarData: Avat
 				local success, result = pcall(function()
 					return InsertService:LoadAsset(assetId)
 				end)
-
+				
 				if success and result then
 					local bodyPart = result:GetChildren()[1]
 					if bodyPart and bodyPart:IsA("BasePart") then
@@ -493,7 +491,7 @@ function AvatarStandManager:_loadAvatarOnStand(standId: string, avatarData: Avat
 					resolveLoad(fallbackPart)
 				end
 			end)
-
+			
 			table.insert(loadPromises, loadPromise)
 		end
 
@@ -506,7 +504,7 @@ function AvatarStandManager:_loadAvatarOnStand(standId: string, avatarData: Avat
 				rootPart.Position = avatarPosition.Position
 				rootPart.Anchored = true
 				rootPart.CanCollide = false
-
+				
 				humanoid.RootPart = rootPart
 
 				-- Position other parts relative to torso
@@ -515,25 +513,25 @@ function AvatarStandManager:_loadAvatarOnStand(standId: string, avatarData: Avat
 					bodyParts.head.Anchored = true
 					bodyParts.head.CanCollide = false
 				end
-
+				
 				if bodyParts.leftArm then
 					bodyParts.leftArm.Position = rootPart.Position + Vector3.new(-1.5, 0.5, 0)
 					bodyParts.leftArm.Anchored = true
 					bodyParts.leftArm.CanCollide = false
 				end
-
+				
 				if bodyParts.rightArm then
 					bodyParts.rightArm.Position = rootPart.Position + Vector3.new(1.5, 0.5, 0)
 					bodyParts.rightArm.Anchored = true
 					bodyParts.rightArm.CanCollide = false
 				end
-
+				
 				if bodyParts.leftLeg then
 					bodyParts.leftLeg.Position = rootPart.Position + Vector3.new(-0.5, -1.5, 0)
 					bodyParts.leftLeg.Anchored = true
 					bodyParts.leftLeg.CanCollide = false
 				end
-
+				
 				if bodyParts.rightLeg then
 					bodyParts.rightLeg.Position = rootPart.Position + Vector3.new(0.5, -1.5, 0)
 					bodyParts.rightLeg.Anchored = true
@@ -819,37 +817,37 @@ end
 
 function AvatarStandManager:_setupNetworking()
 	-- Handle client requests for stand data
-	systemMaid:Give(Signal.OnServer(RemoteIds.REQUEST_STAND_DATA):Connect(function(player: Player, standId: string?)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.REQUEST_STAND_DATA):Connect(function(player: Player, standId: string?)
 		self:_handleStandDataRequest(player, standId)
 	end))
-
+	
 	-- Handle client requests for nearby stands
-	systemMaid:Give(Signal.OnServer(RemoteIds.REQUEST_NEARBY_STANDS):Connect(function(player: Player, position: Vector3, range: number?)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.REQUEST_NEARBY_STANDS):Connect(function(player: Player, position: Vector3, range: number?)
 		self:_handleNearbyStandsRequest(player, position, range or 100)
 	end))
-
+	
 	-- Handle stand interactions from clients
-	systemMaid:Give(Signal.OnServer(RemoteIds.INTERACT_WITH_STAND):Connect(function(player: Player, standId: string, interactionType: string)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.INTERACT_WITH_STAND):Connect(function(player: Player, standId: string, interactionType: string)
 		self:_handleStandInteraction(player, standId, interactionType)
 	end))
-
+	
 	-- Handle stand configuration updates (admin/editor only)
-	systemMaid:Give(Signal.OnServer(RemoteIds.UPDATE_STAND_CONFIG):Connect(function(player: Player, standId: string, newConfig: StandConfig)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.UPDATE_STAND_CONFIG):Connect(function(player: Player, standId: string, newConfig: StandConfig)
 		self:_handleStandConfigUpdate(player, standId, newConfig)
 	end))
-
+	
 	-- Handle avatar data updates
-	systemMaid:Give(Signal.OnServer(RemoteIds.UPDATE_AVATAR_DATA):Connect(function(player: Player, standId: string, avatarData: AvatarDisplay)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.UPDATE_AVATAR_DATA):Connect(function(player: Player, standId: string, avatarData: AvatarDisplay)
 		self:_handleAvatarDataUpdate(player, standId, avatarData)
 	end))
-
+	
 	-- Handle avatar display customization updates (from catalog)
-	systemMaid:Give(Signal.OnServer(RemoteIds.UPDATE_AVATAR_DISPLAY):Connect(function(player: Player, standId: string, displayData: any)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.UPDATE_AVATAR_DISPLAY):Connect(function(player: Player, standId: string, displayData: any)
 		self:_handleAvatarDisplayUpdate(player, standId, displayData)
 	end))
-
+	
 	-- Handle player position updates for proximity detection
-	systemMaid:Give(Signal.OnServer(RemoteIds.PLAYER_POSITION_UPDATE):Connect(function(player: Player, position: Vector3)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.PLAYER_POSITION_UPDATE):Connect(function(player: Player, position: Vector3)
 		self:_handlePlayerPositionUpdate(player, position)
 	end))
 end
@@ -860,7 +858,7 @@ function AvatarStandManager:_handleStandDataRequest(player: Player, standId: str
 		-- Request for specific stand
 		local standConfig = stands[standId]
 		if standConfig then
-						Signal.FireClient(RemoteIds.STAND_DATA_SYNC, player, standId, standConfig)
+			Signal.FireClient(RemoteIds.STAND_DATA_SYNC, player, standId, standConfig)
 		end
 	else
 		-- Request for all stands (typically for new clients)
@@ -873,14 +871,14 @@ end
 -- Handle client request for nearby stands
 function AvatarStandManager:_handleNearbyStandsRequest(player: Player, position: Vector3, range: number)
 	local nearbyStands = {}
-
+	
 	for standId, standConfig in stands do
 		local distance = (standConfig.position - position).Magnitude
 		if distance <= range then
 			nearbyStands[standId] = standConfig
 		end
 	end
-
+	
 	-- Send all nearby stands in one batch
 	for standId, standConfig in nearbyStands do
 		Signal.FireClient(RemoteIds.STAND_DATA_SYNC, player, standId, standConfig)
@@ -894,13 +892,13 @@ function AvatarStandManager:_handleStandInteraction(player: Player, standId: str
 		warn(`Stand {standId} not found for interaction from {player.Name}`)
 		return
 	end
-
+	
 	-- Check permissions
 	if not standConfig.permissions.canInteract then
 		warn(`Player {player.Name} cannot interact with stand {standId}`)
 		return
 	end
-
+	
 	-- Check allowed/blocked users
 	if standConfig.permissions.allowedUsers then
 		local isAllowed = false
@@ -915,7 +913,7 @@ function AvatarStandManager:_handleStandInteraction(player: Player, standId: str
 			return
 		end
 	end
-
+	
 	if standConfig.permissions.blockedUsers then
 		for _, userId in standConfig.permissions.blockedUsers do
 			if userId == player.UserId then
@@ -924,7 +922,7 @@ function AvatarStandManager:_handleStandInteraction(player: Player, standId: str
 			end
 		end
 	end
-
+	
 	-- Process interaction based on type
 	if interactionType == "view" then
 		-- Send detailed stand data for viewing
@@ -939,7 +937,7 @@ end
 function AvatarStandManager:_handleStandConfigUpdate(player: Player, standId: string, newConfig: StandConfig)
 	-- TODO: Add proper permission checks for admin/editor roles
 	-- For now, allow any player to update (will be restricted later)
-
+	
 	self:updateStand(standId, newConfig):andThen(function()
 		print(`Stand {standId} updated by {player.Name}`)
 	end):catch(function(err)
@@ -955,7 +953,7 @@ function AvatarStandManager:_handleAvatarDataUpdate(player: Player, standId: str
 		warn(`Player {player.Name} cannot update avatar for stand {standId}`)
 		return
 	end
-
+	
 	self:updateAvatarData(standId, avatarData):andThen(function()
 		print(`Avatar updated for stand {standId} by {player.Name}`)
 	end):catch(function(err)
@@ -971,7 +969,7 @@ function AvatarStandManager:_handleAvatarDisplayUpdate(player: Player, standId: 
 		warn(`Player {player.Name} cannot update avatar display for stand {standId}`)
 		return
 	end
-
+	
 	-- Apply the display customization
 	if displayData.bodyColors then
 		-- Handle body color updates
@@ -980,15 +978,15 @@ function AvatarStandManager:_handleAvatarDisplayUpdate(player: Player, standId: 
 			accessories = {},
 			bodyColors = {}
 		}
-
+		
 		avatarData.bodyColors = displayData.bodyColors
-
+		
 		self:updateAvatarData(standId, avatarData):andThen(function()
 			print(`Body colors updated for stand {standId} by {player.Name}`)
 		end):catch(function(err)
 			warn(`Failed to update body colors for stand {standId}: {err}`)
 		end)
-
+		
 	elseif displayData.assetId and displayData.assetType then
 		-- Handle asset/accessory updates
 		local avatarData = standConfig.avatarData or {
@@ -996,7 +994,7 @@ function AvatarStandManager:_handleAvatarDisplayUpdate(player: Player, standId: 
 			accessories = {},
 			bodyColors = {}
 		}
-
+		
 		-- Add or update accessory based on category
 		if displayData.category == "Shirts" then
 			avatarData.appearance.shirtId = displayData.assetId
@@ -1009,7 +1007,7 @@ function AvatarStandManager:_handleAvatarDisplayUpdate(player: Player, standId: 
 			if not avatarData.accessories then
 				avatarData.accessories = {}
 			end
-
+			
 			-- Add to accessories array (removing any previous items of the same type)
 			for i = #avatarData.accessories, 1, -1 do
 				local accessory = avatarData.accessories[i]
@@ -1017,13 +1015,13 @@ function AvatarStandManager:_handleAvatarDisplayUpdate(player: Player, standId: 
 					table.remove(avatarData.accessories, i)
 				end
 			end
-
+			
 			table.insert(avatarData.accessories, {
 				assetId = displayData.assetId,
 				assetType = displayData.assetType,
 			})
 		end
-
+		
 		self:updateAvatarData(standId, avatarData):andThen(function()
 			print(`{displayData.category} item {displayData.assetId} applied to stand {standId} by {player.Name}`)
 		end):catch(function(err)
@@ -1037,18 +1035,18 @@ function AvatarStandManager:_handlePlayerPositionUpdate(player: Player, position
 	-- Update player's last known position for better proximity detection
 	-- This is optional optimization - the main proximity detection still works via RunService
 	-- But this allows for more responsive interaction zone detection
-
+	
 	-- Check for zone enter/exit events
 	local playerId = player.UserId
 	local currentZones = playersInZones[playerId] or {}
 	local newZones = {}
-
+	
 	-- Find which zones player is now in
 	for standId, standConfig in stands do
 		local distance = (standConfig.position - position).Magnitude
 		if distance <= AvatarStandsConfig.INTERACTION_ZONE_RADIUS then
 			newZones[standId] = true
-
+			
 			-- Check if this is a new zone entry
 			if not currentZones[standId] then
 				Signal.FireClient(RemoteIds.INTERACTION_ZONE_STATE, player, standId, "entered")
@@ -1056,15 +1054,15 @@ function AvatarStandManager:_handlePlayerPositionUpdate(player: Player, position
 			end
 		end
 	end
-
+	
 	-- Check for zone exits
 	for standId in currentZones do
 		if not newZones[standId] then
-							Signal.FireClient(RemoteIds.INTERACTION_ZONE_STATE, player, standId, "exited")
+			Signal.FireClient(RemoteIds.INTERACTION_ZONE_STATE, player, standId, "exited")
 			self:_fireProximityEvent(STAND_EVENTS.PLAYER_EXITED_ZONE, { playerId = playerId, standId = standId }, position, 50)
 		end
 	end
-
+	
 	-- Update stored zones
 	playersInZones[playerId] = newZones
 end
@@ -1086,10 +1084,10 @@ function AvatarStandManager:handleCreateStandRequest(player: Player, position: V
 			reject("PERMISSION_DENIED")
 			return
 		end
-
+		
 		-- Generate unique stand ID
 		local standId = "stand_" .. player.UserId .. "_" .. DateTime.now().UnixTimestamp
-
+		
 		-- Create stand configuration
 		local config: StandConfig = {
 			standId = standId,
@@ -1100,7 +1098,7 @@ function AvatarStandManager:handleCreateStandRequest(player: Player, position: V
 			version = 1,
 			createdAt = DateTime.now().UnixTimestamp,
 			lastUpdated = DateTime.now().UnixTimestamp,
-
+			
 			displaySettings = {
 				lightingPreset = "bright",
 				showOutfitName = true,
@@ -1111,7 +1109,7 @@ function AvatarStandManager:handleCreateStandRequest(player: Player, position: V
 				creatorNameSize = 14,
 				rotationSpeed = 1.0,
 			},
-
+			
 			permissions = {
 				canInteract = true,
 				canEdit = false,
@@ -1123,7 +1121,7 @@ function AvatarStandManager:handleCreateStandRequest(player: Player, position: V
 				maintenanceMode = false,
 			},
 		}
-
+		
 		-- Create the stand
 		self:createStand(config):andThen(function(createdStandId)
 			print(`✅ Stand {createdStandId} created by {player.Name} at {position}`)
@@ -1138,13 +1136,13 @@ end
 -- Set up creation-specific networking
 function AvatarStandManager:_setupCreationNetworking()
 	-- Handle permission checks
-	systemMaid:Give(Signal.OnServer(RemoteIds.CHECK_PERMISSIONS):Connect(function(player: Player)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.CHECK_PERMISSIONS):Connect(function(player: Player)
 		local hasPermissions = self:checkPlayerPermissions(player)
 		Signal.FireClient(RemoteIds.PERMISSION_CHECK_RESPONSE, player, hasPermissions)
 	end))
-
+	
 	-- Handle creation requests
-	systemMaid:Give(Signal.OnServer(RemoteIds.CREATE_STAND_REQUEST):Connect(function(player: Player, position: Vector3, standName: string)
+	systemMaid:GiveTask(Signal.OnServer(RemoteIds.CREATE_STAND_REQUEST):Connect(function(player: Player, position: Vector3, standName: string)
 		self:handleCreateStandRequest(player, position, standName):andThen(function(standId)
 			Signal.FireClient(RemoteIds.CREATE_STAND_RESPONSE, player, true, standId)
 		end):catch(function(error)

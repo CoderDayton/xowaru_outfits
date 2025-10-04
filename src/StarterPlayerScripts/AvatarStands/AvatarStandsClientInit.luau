@@ -38,15 +38,15 @@ local CLIENT_EVENTS = {
 local clientManager = AvatarStandClient.new()
 
 -- Set up event listeners using Signal.OnClient
-clientMaid:GiveTask(Signal.OnClient(CLIENT_EVENTS.INTERACTION_ZONE_ENTERED):Connect(function(standId)
+clientMaid:GiveTask(Signal.OnLocal(CLIENT_EVENTS.INTERACTION_ZONE_ENTERED, function(standId)
 	print("🎭 Entered interaction zone for stand:", standId)
 end))
 
-clientMaid:GiveTask(Signal.OnClient(CLIENT_EVENTS.INTERACTION_ZONE_EXITED):Connect(function(standId)
+clientMaid:GiveTask(Signal.OnLocal(CLIENT_EVENTS.INTERACTION_ZONE_EXITED, function(standId)
 	print("🎭 Exited interaction zone for stand:", standId)
 end))
 
-clientMaid:GiveTask(Signal.OnClient(CLIENT_EVENTS.UI_STATE_CHANGED):Connect(function(newState)
+clientMaid:GiveTask(Signal.OnLocal(CLIENT_EVENTS.UI_STATE_CHANGED, function(newState)
 	print("🎮 UI State changed:", newState.currentView, "Active Stand:", newState.activeStandId)
 end))
 

@@ -59,6 +59,13 @@ export type AvatarDisplay = {
 	accessories: { AccessoryInfo },
 	bodyColors: BodyColors?,
 	scales: BodyScales?,
+	-- Body part asset IDs for custom avatar loading
+	headId: number?,
+	torsoId: number?,
+	leftArmId: number?,
+	rightArmId: number?,
+	leftLegId: number?,
+	rightLegId: number?,
 	lastUpdated: number,
 }
 

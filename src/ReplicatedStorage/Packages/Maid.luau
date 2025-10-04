@@ -5,17 +5,17 @@
 
     Example:
         local Maid        = require(game.ReplicatedStorage.Maid)
-        local RemoteSignal = require(game.ReplicatedStorage.RemoteSignal)
+        local Signal = require(game.ReplicatedStorage.RemoteSignal)
 
         local maid = Maid.new()
 
         -- Listen for a RemoteEvent
-        maid += RemoteSignal.OnClient("Damage", function(amount)
+        maid += Signal.OnClient("Damage", function(amount)
             print("You took", amount, "damage")
         end)
 
         -- Local UI channel
-        maid += RemoteSignal.OnLocal("HUD", updateHud)
+        maid += Signal.OnLocal("HUD", updateHud)
 
         -- When the screen closes, clean everything
         script.Parent.CloseButton.MouseButton1Click:Connect(function()
@@ -46,10 +46,14 @@ end
 --   • RBXScriptConnection  ➜ Disconnect()
 --   • Instance             ➜ Destroy()
 --   • function()           ➜ call it
+--   • table with Disconnect method ➜ Disconnect()
 function Maid:Give(task)
 	local kind = typeof(task)
 
 	if kind == "RBXScriptConnection" or kind == "Instance" or kind == "function" then
+		self._tasks[#self._tasks + 1] = task
+	elseif kind == "table" and type(task.Disconnect) == "function" then
+		-- Support custom Connection objects (like from State module)
 		self._tasks[#self._tasks + 1] = task
 	else
 		error(("Maid.Give ▸ unsupported type %s"):format(kind))
@@ -78,6 +82,9 @@ function Maid:Clean()
 			if task.Parent then -- minor guard
 				task:Destroy()
 			end
+		elseif kind == "table" and type(task.Disconnect) == "function" then
+			-- Handle custom Connection objects
+			task:Disconnect()
 		else -- function
 			task()
 		end

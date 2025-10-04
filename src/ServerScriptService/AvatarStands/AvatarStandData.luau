@@ -123,13 +123,59 @@ function AvatarStandData:removeStand(standId: string): Promise<boolean>
 	end)
 end
 
--- Load all stands from persistent storage - simplified approach
+-- Load all stands from persistent storage with proper bulk loading
 function AvatarStandData:loadAllStands(): Promise<{[string]: PersistedStandData}>
 	return Promise.new(function(resolve, reject)
-		-- Note: For simplicity, we'll load individual stands as needed
-		-- GameData's caching will handle performance optimization
-		-- If we need bulk loading, we can enhance this later
-		resolve({})
+		if isShuttingDown then
+			reject("Server is shutting down")
+			return
+		end
+
+		-- Use GameData's List method to get all keys first
+		avatarStandStore:List():andThen(function(standIds)
+			if not standIds or #standIds == 0 then
+				resolve({})
+				return
+			end
+
+			-- Load each stand individually using Promise.All for efficiency
+			local loadPromises = {}
+			for _, standId in ipairs(standIds) do
+				local loadPromise = self:loadStand(standId):andThen(function(standData)
+					return {standId = standId, data = standData}
+				end):catch(function(err)
+					warn(`Failed to load stand {standId} during bulk load: {err}`)
+					return {standId = standId, data = nil}
+				end)
+				
+				table.insert(loadPromises, loadPromise)
+			end
+
+			-- Wait for all stands to load
+			Promise.All(loadPromises):andThen(function(results)
+				local allStands = {}
+				local loadedCount = 0
+				local failedCount = 0
+
+				for _, result in ipairs(results) do
+					if result.data then
+						allStands[result.standId] = result.data
+						loadedCount += 1
+					else
+						failedCount += 1
+					end
+				end
+
+				print(`📋 Bulk loaded {loadedCount} stands successfully, {failedCount} failed`)
+				resolve(allStands)
+			end):catch(function(err)
+				warn(`Bulk load failed: {err}`)
+				reject(err)
+			end)
+		end):catch(function(err)
+			warn(`Failed to list stands for bulk loading: {err}`)
+			reject(err)
+		end)
 	end)
 end
 

@@ -20,6 +20,7 @@ export type GameDataStore = {
 	Update: (self: GameDataStore, key: string, updater: (old: any) -> any) -> any,
 	Increment: (self: GameDataStore, key: string, delta: number) -> any,
 	Remove: (self: GameDataStore, key: string) -> any,
+	List: (self: GameDataStore) -> any,
 	GetCached: (self: GameDataStore, key: string) -> any?,
 	InvalidateCache: (self: GameDataStore, key: string) -> (),
 }
@@ -30,6 +31,7 @@ GameData.__index = GameData
 local DEFAULT_TTL = 300 -- seconds
 local cache: { [string]: CacheEntry } = {}
 local stores: { [string]: DataStore } = {}
+local orderedStores: { [string]: OrderedDataStore } = {}
 
 local function getStore(storeName: string): DataStore
 	local ds = stores[storeName]
@@ -38,6 +40,15 @@ local function getStore(storeName: string): DataStore
 		stores[storeName] = ds
 	end
 	return ds
+end
+
+local function getOrderedStore(storeName: string): OrderedDataStore
+	local ods = orderedStores[storeName]
+	if not ods then
+		ods = DataStoreService:GetOrderedDataStore(storeName .. "_keys")
+		orderedStores[storeName] = ods
+	end
+	return ods
 end
 
 local function cacheKey(storeName: string, key: string): string
@@ -102,18 +113,31 @@ function GameData:Get(key: string, ttl: number?): any
 end
 
 function GameData:Set(key: string, value: any): any
-	self:InvalidateCache(key)
 	return Backoff.RetryAsync(function()
-		waitForBudget(Enum.DataStoreRequestType.UpdateAsync) -- Set/Update share budget. [1]
+		waitForBudget(Enum.DataStoreRequestType.SetIncrementAsync) -- SetAsync shares budget with IncrementAsync. [1]
 		local ds = getStore(self.StoreName)
-		ds:SetAsync(key, value)
-		return value
+		local ods = getOrderedStore(self.StoreName)
+		
+		local success = ds:SetAsync(key, value)
+		
+		-- Track the key in ordered store for listing (set with current timestamp as value)
+		pcall(function()
+			ods:SetAsync(key, os.time())
+		end)
+
+		-- Update cache
+		cache[cacheKey(self.StoreName, key)] = {
+			data = value,
+			timestamp = os.time(),
+			ttl = DEFAULT_TTL,
+		}
+		return success
 	end, {
 		maxRetries = 5,
-		baseDelay = 0.5,
-		maxDelay = 8.0,
+		baseDelay = 0.25,
+		maxDelay = 6.0,
 		jitterFactor = 0.2,
-	})
+	}) -- SetAsync has throttle drops in 306-class; backoff on retries. [1]
 end
 
 function GameData:Update(key: string, updater: (old: any) -> any): any
@@ -149,18 +173,60 @@ function GameData:Increment(key: string, delta: number): any
 end
 
 function GameData:Remove(key: string): any
-	self:InvalidateCache(key)
 	return Backoff.RetryAsync(function()
-		waitForBudget(Enum.DataStoreRequestType.UpdateAsync)
+		waitForBudget(Enum.DataStoreRequestType.SetIncrementAsync) -- RemoveAsync uses SetIncrementAsync budget. [1]
 		local ds = getStore(self.StoreName)
-		ds:RemoveAsync(key)
-		return true
+		local ods = getOrderedStore(self.StoreName)
+		
+		local success = ds:RemoveAsync(key)
+		
+		-- Remove the key from ordered store tracking
+		pcall(function()
+			ods:RemoveAsync(key)
+		end)
+
+		-- Update cache
+		cache[cacheKey(self.StoreName, key)] = nil
+		return success
 	end, {
 		maxRetries = 5,
-		baseDelay = 0.5,
+		baseDelay = 0.25,
 		maxDelay = 8.0,
 		jitterFactor = 0.2,
 	}) -- RemoveAsync has its own throttle/drop codes in 306-class; backoff helps. [1]
+end
+
+function GameData:List(): any
+	return Backoff.RetryAsync(function()
+		waitForBudget(Enum.DataStoreRequestType.GetAsync)
+		local ods = getOrderedStore(self.StoreName)
+		
+		-- Get all keys from ordered data store (sorted by timestamp)
+		local pages = ods:GetSortedAsync(false, 100) -- Get up to 100 keys, newest first
+		local keys = {}
+		
+		if pages then
+			while true do
+				local data = pages:GetCurrentPage()
+				for _, entry in ipairs(data) do
+					table.insert(keys, entry.key)
+				end
+				
+				if pages.IsFinished then
+					break
+				end
+				
+				pages:AdvanceToNextPageAsync()
+			end
+		end
+		
+		return keys
+	end, {
+		maxRetries = 3,
+		baseDelay = 0.25,
+		maxDelay = 4.0,
+		jitterFactor = 0.1,
+	})
 end
 
 return GameData :: GameDataStore

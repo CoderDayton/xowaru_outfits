@@ -96,49 +96,49 @@ end
 -- PUBLIC API
 --------------------------------------------------------------------
 
-local RemoteSignal = {}
+local Signal = {}
 
 ------------------------------------------------------------------
 -- 🔊  LISTEN
 ------------------------------------------------------------------
 
 -- Client listens to server-sent RemoteEvent
-function RemoteSignal.OnClient(eventName, fn)
+function Signal.OnClient(eventName, fn)
 	assert(RunService:IsClient(), "OnClient only in LocalScript")
 	local r = getRemote(eventName)
 	local m = getMaid(eventName)
 	local c = r.OnClientEvent:Connect(fn)
-	m:GiveTask(c)
+	m:Give(c)
 	return c
 end
 
 -- Server listens to client-sent RemoteEvent
-function RemoteSignal.OnServer(eventName, fn)
+function Signal.OnServer(eventName, fn)
 	assert(RunService:IsServer(), "OnServer only in Script")
 	local r = getRemote(eventName)
 	local m = getMaid(eventName)
 	local c = r.OnServerEvent:Connect(fn)
-	m:GiveTask(c)
+	m:Give(c)
 	return c
 end
 
 -- Client-local BindableEvent listener (zero-lag UI updates)
-function RemoteSignal.OnLocal(eventName, fn)
+function Signal.OnLocal(eventName, fn)
 	assert(RunService:IsClient(), "OnLocal only in LocalScript")
 	local b = getBindable(eventName)
 	local m = getMaid(eventName .. "_local")
 	local c = b.Event:Connect(fn)
-	m:GiveTask(c)
+	m:Give(c)
 	return c
 end
 
 -- Server-Server BindableEvent listener (zero-lag internal events)
-function RemoteSignal.OnServerLocal(eventName, fn)
+function Signal.OnServerLocal(eventName, fn)
 	assert(RunService:IsServer(), "OnServerLocal only in Script (server)")
 	local b = getServerBindable(eventName)
 	local m = getMaid(eventName .. "_server")
 	local c = b.Event:Connect(fn)
-	m:GiveTask(c)
+	m:Give(c)
 	return c
 end
 
@@ -147,31 +147,31 @@ end
 ------------------------------------------------------------------
 
 -- Client ➜ Server
-function RemoteSignal.FireServer(eventName, ...)
+function Signal.FireServer(eventName, ...)
 	assert(RunService:IsClient(), "FireServer only in LocalScript")
 	getRemote(eventName):FireServer(...)
 end
 
 -- Server ➜ Client (one)
-function RemoteSignal.FireClient(eventName, player, ...)
+function Signal.FireClient(eventName, player, ...)
 	assert(RunService:IsServer(), "FireClient only in Script")
 	getRemote(eventName):FireClient(player, ...)
 end
 
 -- Server ➜ Client (all)
-function RemoteSignal.FireAll(eventName, ...)
+function Signal.FireAll(eventName, ...)
 	assert(RunService:IsServer(), "FireAll only in Script")
 	getRemote(eventName):FireAllClients(...)
 end
 
 -- Client ➜ Client (same device)
-function RemoteSignal.FireLocal(eventName, ...)
+function Signal.FireLocal(eventName, ...)
 	assert(RunService:IsClient(), "FireLocal only in LocalScript")
 	getBindable(eventName):Fire(...)
 end
 
 -- Server ➜ Server (same server)
-function RemoteSignal.FireServerLocal(eventName, ...)
+function Signal.FireServerLocal(eventName, ...)
 	assert(RunService:IsServer(), "FireServerLocal only in Script (server)")
 	getServerBindable(eventName):Fire(...)
 end
@@ -180,18 +180,18 @@ end
 -- 🧹  CLEANUP
 ------------------------------------------------------------------
 
-function RemoteSignal.Cleanup(eventName)
+function Signal.Cleanup(eventName)
 	if maids[eventName] then
 		maids[eventName]:DoCleaning()
 		maids[eventName] = nil
 	end
 end
 
-function RemoteSignal.CleanupAll()
+function Signal.CleanupAll()
 	for _, m in pairs(maids) do
 		m:DoCleaning()
 	end
 	table.clear(maids)
 end
 
-return RemoteSignal
+return Signal
